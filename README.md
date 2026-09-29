@@ -7,6 +7,14 @@
 
 [![SWUbanner](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/banner2-direct.svg)](https://vshymanskyy.github.io/StandWithUkraine/)
 
+> [!NOTE]
+> This fork builds an Apple silicon–only Kap (macOS 12 or later) that runs without Rosetta. The upstream 3.6.0 arm64 build (linked below) still bundles `x86_64`-only helpers (ffmpeg, gifsicle, and several Swift tools), which crash on macOS versions without Rosetta. See [`native/`](native/README.md) for details. Auto-updates check this fork's releases instead of upstream's. Build it with Node.js 16, Xcode, and `autoconf`/`automake` (`brew install autoconf automake`):
+>
+> ```sh
+> yarn install --frozen-lockfile
+> yarn dist
+> ```
+
 ## Get Kap
 
 Download the latest release:
