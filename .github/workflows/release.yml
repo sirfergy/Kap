@@ -1,0 +1,207 @@
+name: Release
+
+# Publishes a signed, notarized release when a v<version> tag matching package.json is
+# pushed for a commit on main. Re-run a failed run to retry; drafts it left are replaced.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  check:
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 10
+    outputs:
+      should_release: ${{ steps.release.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate tag
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if [[ "$GITHUB_REF_TYPE" != tag || ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Run this workflow on a vX.Y.Z tag (got $GITHUB_REF)." >&2
+            exit 1
+          fi
+          version="$(jq -r .version package.json)"
+          if [[ "$tag" != "v$version" ]]; then
+            echo "Tag $tag does not match package.json version $version." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "$tag ($GITHUB_SHA) is not on main." >&2
+            exit 1
+          fi
+          published="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft \
+            --jq '.[] | select((.isDraft | not) and (.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))) | .tagName')"
+          if grep -qxF "$tag" <<< "$published"; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "Skipped: $tag is already released." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Installed copies update from the latest release, so never publish an older version.
+          newest="$(printf '%s\n' "$published" "$tag" | sed '/^$/d' | sort -V | tail -1)"
+          if [[ "$newest" != "$tag" ]]; then
+            echo "Refusing to release $tag: $newest is newer and already released." >&2
+            exit 1
+          fi
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag" >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 90
+    environment: release
+    permissions:
+      contents: write
+    env:
+      # Must match the identity that signed installed copies, or macOS drops their
+      # Screen Recording grant and the auto-updater rejects the update.
+      EXPECTED_TEAM_ID: M32S59L6U6
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 16.20.2
+
+      - name: Install Yarn
+        run: npm install --global yarn@1.22.22
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Lint, test, and build
+        run: |
+          yarn lint
+          yarn test:main
+          yarn build
+
+      - name: Import signing credentials
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          : "${DEVELOPER_ID_P12_BASE64:?release environment secret MACOS_DEVELOPER_ID_P12_BASE64 is required}"
+          : "${DEVELOPER_ID_P12_PASSWORD:?release environment secret MACOS_DEVELOPER_ID_P12_PASSWORD is required}"
+          : "${NOTARY_KEY_P8_BASE64:?release environment secret APPLE_NOTARY_KEY_P8_BASE64 is required}"
+          : "${NOTARY_KEY_ID:?release environment secret APPLE_NOTARY_KEY_ID is required}"
+          : "${NOTARY_ISSUER_ID:?release environment secret APPLE_NOTARY_ISSUER_ID is required}"
+          umask 077
+          keychain="$RUNNER_TEMP/kap-signing.keychain-db"
+          certificate="$RUNNER_TEMP/developer-id.p12"
+          notary_key="$RUNNER_TEMP/AuthKey.p8"
+          keychain_password="$(openssl rand -base64 32)"
+          printf '%s' "$DEVELOPER_ID_P12_BASE64" | base64 -D > "$certificate"
+          printf '%s' "$NOTARY_KEY_P8_BASE64" | base64 -D > "$notary_key"
+
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 7200 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$DEVELOPER_ID_P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security -x
+          rm -f "$certificate"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+            -k "$keychain_password" "$keychain" >/dev/null
+          # codesign only resolves the certificate chain from keychains on the search list.
+          python3 scripts/keychain-search.py "$keychain"
+          # Keep the notary key in the job keychain rather than on disk during the build.
+          xcrun notarytool store-credentials kap-release --keychain "$keychain" \
+            --key "$notary_key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID"
+          rm -f "$notary_key"
+
+          identities="$(security find-identity -v -p codesigning "$keychain" |
+            sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p')"
+          if [[ "$(printf '%s\n' "$identities" | sed '/^$/d' | wc -l | tr -d ' ')" != 1 ]]; then
+            echo "Expected exactly one Developer ID Application identity." >&2
+            exit 1
+          fi
+          if [[ "$identities" != *"($EXPECTED_TEAM_ID)" ]]; then
+            echo "Signing identity '$identities' is not from team $EXPECTED_TEAM_ID." >&2
+            exit 1
+          fi
+
+      - name: Sign and notarize
+        env:
+          CSC_KEYCHAIN: ${{ runner.temp }}/kap-signing.keychain-db
+          APPLE_KEYCHAIN: ${{ runner.temp }}/kap-signing.keychain-db
+          APPLE_KEYCHAIN_PROFILE: kap-release
+        run: yarn electron-builder --publish never -c.forceCodeSigning=true
+
+      - name: Verify artifacts
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          verify_app() {
+            codesign --verify --deep --strict "$1"
+            team="$(codesign -dv "$1" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+            if [[ "$team" != "$EXPECTED_TEAM_ID" ]]; then
+              echo "$1 is signed by team '$team', expected $EXPECTED_TEAM_ID." >&2
+              exit 1
+            fi
+            xcrun stapler validate "$1"
+            spctl --assess --type execute -vv "$1"
+          }
+          verify_app dist/mac-arm64/Kap.app
+          # The auto-updater installs the app inside the zip.
+          unzipped="$RUNNER_TEMP/kap-zip"
+          rm -rf "$unzipped"
+          ditto -x -k "dist/Kap-$version-arm64-mac.zip" "$unzipped"
+          verify_app "$unzipped/Kap.app"
+          rm -rf "$unzipped"
+          python3 scripts/verify-update-metadata.py dist "$version"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+          # Re-check now that signing is done, in case a newer release appeared meanwhile.
+          newest="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft \
+            --jq '.[] | select((.isDraft | not) and (.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))) | .tagName')"
+          newest="$(printf '%s\n' "$newest" "$tag" | sed '/^$/d' | sort -V | tail -1)"
+          if [[ "$newest" != "$tag" ]]; then
+            echo "Refusing to publish $tag: $newest was released meanwhile." >&2
+            exit 1
+          fi
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.draft and .tag_name == \"$tag\") | .id"); do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+          done
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --latest \
+            --title "Kap $version" --notes "Apple silicon build of $GITHUB_SHA." \
+            dist/latest-mac.yml \
+            "dist/Kap-$version-arm64-mac.zip" "dist/Kap-$version-arm64-mac.zip.blockmap" \
+            "dist/Kap-$version-arm64.dmg" "dist/Kap-$version-arm64.dmg.blockmap"
+
+      - name: Remove signing credentials
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP/AuthKey.p8"
+          python3 scripts/keychain-search.py --delete "$RUNNER_TEMP/kap-signing.keychain-db"
