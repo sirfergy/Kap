@@ -2,7 +2,7 @@
   <img src="https://getkap.co/static/favicon/kap.svg" height="64">
   <h3 align="center">Kap</h3>
   <p align="center">An open-source screen recorder built with web technology<p>
-  <p align="center"><a href="https://circleci.com/gh/wulkano/kap"><img src="https://circleci.com/gh/wulkano/Kap.svg?style=shield" alt="Build Status"></a> <a href="https://github.com/sindresorhus/xo"><img src="https://img.shields.io/badge/code_style-XO-5ed9c7.svg" alt="XO code style"></a></p>
+  <p align="center"><a href="https://github.com/sirfergy/Kap/actions/workflows/ci.yml"><img src="https://github.com/sirfergy/Kap/actions/workflows/ci.yml/badge.svg" alt="Build Status"></a> <a href="https://github.com/sindresorhus/xo"><img src="https://img.shields.io/badge/code_style-XO-5ed9c7.svg" alt="XO code style"></a></p>
 </p>
 
 [![SWUbanner](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/banner2-direct.svg)](https://vshymanskyy.github.io/StandWithUkraine/)
@@ -14,6 +14,8 @@
 > yarn install --frozen-lockfile
 > yarn dist
 > ```
+>
+> Signed, notarized builds are on this fork's [Releases](https://github.com/sirfergy/Kap/releases) page. CI runs on a self-hosted Apple silicon runner for branches pushed to this repository (Node.js is installed by the workflow; the runner needs Xcode plus `autoconf`/`automake` on its `PATH`). To release, bump `version` in `package.json` on `main`, then push a matching `v<version>` tag. The `release` environment needs the `MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, `APPLE_NOTARY_KEY_P8_BASE64`, `APPLE_NOTARY_KEY_ID`, and `APPLE_NOTARY_ISSUER_ID` secrets.
 
 ## Get Kap
 
