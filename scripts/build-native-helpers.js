@@ -1,20 +1,17 @@
 'use strict';
 // Several dependencies ship prebuilt x86_64-only helper executables, which crash on
 // Apple silicon Macs without Rosetta. This rebuilds them for arm64 from the sources
-// vendored in `native/`, and makes sure ffmpeg and gifsicle are arm64 builds as well.
+// vendored in `native/`, and makes sure ffmpeg is an arm64 build as well.
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const {execFileSync} = require('child_process');
 
 const ARCH = 'arm64';
 const root = path.join(__dirname, '..');
 const nodeModules = path.join(root, 'node_modules');
-const {minimumSystemVersion} = require('../package.json').build.mac;
 
 const swiftHelpers = [
   {source: 'open-with', product: 'open-with', destination: 'mac-open-with/open-with'},
-  {source: 'screen-capture-permissions', product: 'screen-capture-permissions', destination: 'mac-screen-capture-permissions/screen-capture-permissions'},
   {source: 'mac-windows', product: 'mac-windows', destination: 'mac-windows/scripts/MacWindows'},
   {source: 'activate-window', product: 'activate-window', destination: 'mac-windows/scripts/ActivateWindow'},
   {source: 'audio-devices', product: 'audio-devices', destination: 'macos-audio-devices/audio-devices'},
@@ -73,39 +70,9 @@ const ensureFfmpeg = () => {
   assertArch(ffmpeg);
 };
 
-// Always build gifsicle: its own installer may already have compiled an arm64 binary,
-// but that one targets the build machine's macOS version instead of the app's minimum.
-const buildGifsicle = () => {
-  const vendor = path.join(nodeModules, 'gifsicle', 'vendor');
-  const gifsicle = path.join(vendor, 'gifsicle');
-
-  const tarball = fs.readdirSync(path.join(vendor, 'source')).find(file => /^gifsicle-.+\.tar\.gz$/.test(file));
-  if (!tarball) {
-    throw new Error('Cannot find the gifsicle source tarball');
-  }
-
-  console.log(`Building ${ARCH} gifsicle from ${tarball}…`);
-  const buildDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kap-gifsicle-'));
-  try {
-    run('tar', ['-xzf', path.join(vendor, 'source', tarball), '-C', buildDir, '--strip-components', '1']);
-    const options = {cwd: buildDir, stdio: 'inherit', env: {...process.env, CFLAGS: `-arch ${ARCH} -mmacosx-version-min=${minimumSystemVersion} -O2`}};
-    execFileSync('autoreconf', ['-ivf'], options);
-    execFileSync('./configure', ['--disable-gifview', '--disable-gifdiff', '--host=aarch64-apple-darwin'], options);
-    execFileSync('make', [`-j${os.cpus().length}`], options);
-    fs.rmSync(gifsicle, {force: true});
-    fs.copyFileSync(path.join(buildDir, 'src', 'gifsicle'), gifsicle);
-    fs.chmodSync(gifsicle, 0o755);
-  } finally {
-    fs.rmSync(buildDir, {recursive: true, force: true});
-  }
-
-  assertArch(gifsicle);
-};
-
 if (process.platform === 'darwin') {
   buildSwiftHelpers();
   ensureFfmpeg();
-  buildGifsicle();
 } else {
   console.log('Skipping native helper build: not running on macOS');
 }
