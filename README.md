@@ -8,14 +8,14 @@
 [![SWUbanner](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/banner2-direct.svg)](https://vshymanskyy.github.io/StandWithUkraine/)
 
 > [!NOTE]
-> This fork builds an Apple silicon–only Kap (macOS 12 or later) that runs without Rosetta. The upstream 3.6.0 arm64 build (linked below) still bundles `x86_64`-only helpers (ffmpeg, gifsicle, and several Swift tools), which crash on macOS versions without Rosetta. See [`native/`](native/README.md) for details. Auto-updates check this fork's releases instead of upstream's. Build it with Node.js 16, Xcode, and `autoconf`/`automake` (`brew install autoconf automake`):
+> This fork builds an Apple silicon–only Kap (macOS 12 or later) that runs without Rosetta. The upstream 3.6.0 arm64 build (linked below) still bundles `x86_64`-only helpers (ffmpeg, gifsicle, and several Swift tools), which crash on macOS versions without Rosetta. See [`native/`](native/README.md) for details. Auto-updates check this fork's releases instead of upstream's. Build it with Node.js 16 and Xcode (plus `autoconf`/`automake` only if gifsicle's prebuilt binary fails to download and it falls back to building from source):
 >
 > ```sh
 > yarn install --frozen-lockfile
 > yarn dist
 > ```
 >
-> Signed, notarized builds are on this fork's [Releases](https://github.com/sirfergy/Kap/releases) page. CI runs on a self-hosted Apple silicon runner for branches pushed to this repository (Node.js is installed by the workflow; the runner needs Xcode plus `autoconf`/`automake` on its `PATH`). To release, bump `version` in `package.json` on `main`, then push a matching `v<version>` tag. The `release` environment needs the `MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, `APPLE_NOTARY_KEY_P8_BASE64`, `APPLE_NOTARY_KEY_ID`, and `APPLE_NOTARY_ISSUER_ID` secrets.
+> Signed, notarized builds are on this fork's [Releases](https://github.com/sirfergy/Kap/releases) page. CI runs on a self-hosted Apple silicon runner for branches pushed to this repository (Node.js is installed by the workflow; the runner needs Xcode). To release, bump `version` in `package.json` on `main`, then push a matching `v<version>` tag. The `release` environment needs the `MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, `APPLE_NOTARY_KEY_P8_BASE64`, `APPLE_NOTARY_KEY_ID`, and `APPLE_NOTARY_ISSUER_ID` secrets.
 
 ## Get Kap
 
