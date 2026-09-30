@@ -1,11 +1,13 @@
 name: Release
 
-# Publishes a signed, notarized release when a v<version> tag matching package.json is
-# pushed for a commit on main. Re-run a failed run to retry; drafts it left are replaced.
+# Ships every pull request merged to main in a signed, notarized release. The version is the
+# latest release's patch + 1, or package.json's version if that's higher, so bump package.json
+# in a pull request to ship a minor or major release. Merges that land close together can share
+# one release. Run this workflow from main to retry a failed release.
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -20,49 +22,75 @@ jobs:
   check:
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       should_release: ${{ steps.release.outputs.should_release }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate tag
+      - name: Choose version
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
-          if [[ "$GITHUB_REF_TYPE" != tag || ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Run this workflow on a vX.Y.Z tag (got $GITHUB_REF)." >&2
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "Releases must run from main (got $GITHUB_REF)." >&2
             exit 1
           fi
-          version="$(jq -r .version package.json)"
-          if [[ "$tag" != "v$version" ]]; then
-            echo "Tag $tag does not match package.json version $version." >&2
-            exit 1
-          fi
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "$tag ($GITHUB_SHA) is not on main." >&2
-            exit 1
-          fi
-          published="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft \
-            --jq '.[] | select((.isDraft | not) and (.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))) | .tagName')"
-          if grep -qxF "$tag" <<< "$published"; then
+          skip() {
             echo "should_release=false" >> "$GITHUB_OUTPUT"
-            echo "Skipped: $tag is already released." >> "$GITHUB_STEP_SUMMARY"
+            echo "Skipped: $1" >> "$GITHUB_STEP_SUMMARY"
             exit 0
+          }
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            pulls="$(gh api -H 'X-GitHub-Api-Version: 2022-11-28' "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls")"
+            if ! jq -e --arg sha "$GITHUB_SHA" \
+              'any(.[]; .merged_at != null and .base.ref == "main" and .merge_commit_sha == $sha)' <<< "$pulls" >/dev/null; then
+              skip "$GITHUB_SHA was not created by merging a pull request."
+            fi
           fi
-          # Installed copies update from the latest release, so never publish an older version.
-          newest="$(printf '%s\n' "$published" "$tag" | sed '/^$/d' | sort -V | tail -1)"
-          if [[ "$newest" != "$tag" ]]; then
-            echo "Refusing to release $tag: $newest is newer and already released." >&2
+
+          stable='^[0-9]+\.[0-9]+\.[0-9]+$'
+          latest="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft \
+            --jq '.[] | select((.isDraft | not) and (.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))) | .tagName' |
+            sort -V | tail -1)"
+          floor="$(jq -r .version package.json)"
+          if [[ ! "$floor" =~ $stable ]]; then
+            echo "package.json version $floor is not X.Y.Z." >&2
+            exit 1
+          fi
+
+          version="$floor"
+          if [[ -n "$latest" ]]; then
+            # Runs can start out of order, so never release a commit an earlier release already contains.
+            latest_sha="$(git rev-list -n 1 "$latest")"
+            if git merge-base --is-ancestor "$GITHUB_SHA" "$latest_sha"; then
+              skip "$GITHUB_SHA is already in $latest."
+            fi
+            if ! git merge-base --is-ancestor "$latest_sha" "$GITHUB_SHA"; then
+              echo "$latest is not an ancestor of $GITHUB_SHA." >&2
+              exit 1
+            fi
+            IFS=. read -r major minor patch <<< "${latest#v}"
+            next="$major.$minor.$((patch + 1))"
+            version="$(printf '%s\n' "$next" "$floor" | sort -V | tail -1)"
+          fi
+
+          existing_tag="$(git ls-remote --tags origin "refs/tags/v$version")"
+          if [[ -n "$existing_tag" ]]; then
+            echo "Tag v$version already exists without a published release." >&2
             exit 1
           fi
           echo "should_release=true" >> "$GITHUB_OUTPUT"
-          echo "Releasing $tag" >> "$GITHUB_STEP_SUMMARY"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version" >> "$GITHUB_STEP_SUMMARY"
 
   release:
     needs: check
@@ -73,6 +101,7 @@ jobs:
     permissions:
       contents: write
     env:
+      VERSION: ${{ needs.check.outputs.version }}
       # Must match the identity that signed installed copies, or macOS drops their
       # Screen Recording grant and the auto-updater rejects the update.
       EXPECTED_TEAM_ID: M32S59L6U6
@@ -150,12 +179,11 @@ jobs:
           CSC_KEYCHAIN: ${{ runner.temp }}/kap-signing.keychain-db
           APPLE_KEYCHAIN: ${{ runner.temp }}/kap-signing.keychain-db
           APPLE_KEYCHAIN_PROFILE: kap-release
-        run: yarn electron-builder --publish never -c.forceCodeSigning=true
+        run: yarn electron-builder --publish never -c.forceCodeSigning=true -c.extraMetadata.version="$VERSION"
 
       - name: Verify artifacts
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
           verify_app() {
             codesign --verify --deep --strict "$1"
             team="$(codesign -dv "$1" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
@@ -170,18 +198,17 @@ jobs:
           # The auto-updater installs the app inside the zip.
           unzipped="$RUNNER_TEMP/kap-zip"
           rm -rf "$unzipped"
-          ditto -x -k "dist/Kap-$version-arm64-mac.zip" "$unzipped"
+          ditto -x -k "dist/Kap-$VERSION-arm64-mac.zip" "$unzipped"
           verify_app "$unzipped/Kap.app"
           rm -rf "$unzipped"
-          python3 scripts/verify-update-metadata.py dist "$version"
+          python3 scripts/verify-update-metadata.py dist "$VERSION"
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
-          version="${tag#v}"
+          tag="v$VERSION"
           # Re-check now that signing is done, in case a newer release appeared meanwhile.
           newest="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft \
             --jq '.[] | select((.isDraft | not) and (.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))) | .tagName')"
@@ -190,15 +217,25 @@ jobs:
             echo "Refusing to publish $tag: $newest was released meanwhile." >&2
             exit 1
           fi
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" --jq .status)"
+          if [[ "$status" != ahead && "$status" != identical ]]; then
+            echo "Refusing to publish $tag: $GITHUB_SHA is no longer on main." >&2
+            exit 1
+          fi
+          existing_tag="$(git ls-remote --tags origin "refs/tags/$tag")"
+          if [[ -n "$existing_tag" ]]; then
+            echo "Refusing to publish $tag: the tag already exists." >&2
+            exit 1
+          fi
           for id in $(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
             --jq ".[] | select(.draft and .tag_name == \"$tag\") | .id"); do
             gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
           done
-          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --latest \
-            --title "Kap $version" --notes "Apple silicon build of $GITHUB_SHA." \
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+            --title "Kap $VERSION" --generate-notes \
             dist/latest-mac.yml \
-            "dist/Kap-$version-arm64-mac.zip" "dist/Kap-$version-arm64-mac.zip.blockmap" \
-            "dist/Kap-$version-arm64.dmg" "dist/Kap-$version-arm64.dmg.blockmap"
+            "dist/Kap-$VERSION-arm64-mac.zip" "dist/Kap-$VERSION-arm64-mac.zip.blockmap" \
+            "dist/Kap-$VERSION-arm64.dmg" "dist/Kap-$VERSION-arm64.dmg.blockmap"
 
       - name: Remove signing credentials
         if: always()
