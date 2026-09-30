@@ -15,7 +15,7 @@
 > yarn dist
 > ```
 >
-> Signed, notarized builds are on this fork's [Releases](https://github.com/sirfergy/Kap/releases) page. CI runs on a self-hosted Apple silicon runner for branches pushed to this repository (Node.js is installed by the workflow; the runner needs Xcode). To release, bump `version` in `package.json` on `main`, then push a matching `v<version>` tag. The `release` environment needs the `MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, `APPLE_NOTARY_KEY_P8_BASE64`, `APPLE_NOTARY_KEY_ID`, and `APPLE_NOTARY_ISSUER_ID` secrets.
+> Signed, notarized builds are on this fork's [Releases](https://github.com/sirfergy/Kap/releases) page. CI runs on a self-hosted Apple silicon runner for branches pushed to this repository (Node.js is installed by the workflow; the runner needs Xcode). Every pull request merged to `main` ships in a release with the next patch version, or with `package.json`'s version if that's higher (bump it for a minor or major release). Merges that land close together can share one release. The `release` environment needs the `MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, `APPLE_NOTARY_KEY_P8_BASE64`, `APPLE_NOTARY_KEY_ID`, and `APPLE_NOTARY_ISSUER_ID` secrets.
 
 ## Get Kap
 
